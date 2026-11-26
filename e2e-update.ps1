@@ -113,7 +113,7 @@ $DefaultPatterns = [ordered]@{
   DeltaFallback    = '(Cannot download differentially|fallback to full download)'
   BlockMaps        = 'Download block maps'
   # updater.ts "update: downloaded ... <n> bytes ... delta|full" (the plan: "with the bytes fetched and whether it was a delta")
-  AppBytes         = 'update:.*\bdownloaded\b.*?(?<bytes>\d[\d,]*)\s*(bytes|B)\b'
+  AppBytes         = 'update:.*\bdownloaded\b.*?(?<bytes>\d[\d,]*(\.\d+)?)\s*(?<unit>bytes|B|KB|MB|GB)\b'
   AppDelta         = 'update:.*\bdownloaded\b.*\b(delta|differential)\b'
   AppFull          = 'update:.*\bdownloaded\b.*\bfull\b'
   # Anything that means the update cannot happen in this run (fail fast instead of waiting for the timeout).
@@ -414,7 +414,12 @@ function Get-DeltaInfo($Lines) {
     if ($l -match $P.BlockMaps) { $i.blockMapsLine = $true }
     if ($l -match $P.DeltaFallback) { $i.fallback = $true; $i.fallbackLine = $l }
     $a = [regex]::Match($l, $P.AppBytes, 'IgnoreCase')
-    if ($a.Success) { $i.appBytes = [long]($a.Groups['bytes'].Value -replace ',', '') }
+    if ($a.Success) {
+      # updater.ts writes binary units ("842.8 KB fetched of 222.5 MB"); older lines gave plain bytes
+      $mult = @{ 'bytes' = 1; 'B' = 1; 'KB' = 1024; 'MB' = 1048576; 'GB' = 1073741824 }[$a.Groups['unit'].Value.ToUpper() -replace '^BYTES$', 'bytes']
+      if ($null -eq $mult) { $mult = 1 }
+      $i.appBytes = [long]([double]($a.Groups['bytes'].Value -replace ',', '') * $mult)
+    }
     if ($l -match $P.AppDelta) { $i.appSaysDelta = $true } elseif ($l -match $P.AppFull) { $i.appSaysDelta = $false }
   }
   if ($null -ne $i.downloadBytes) {
@@ -959,7 +964,9 @@ function Invoke-SelfTest {
   [void](Test-That 'pattern Downloaded does not match another version' ($null -eq (Find-Line $deltaLines (Expand-Pattern 'Downloaded' '0.2.30'))))
   [void](Test-That 'pattern Started matches main.ts line' ('2026-11-19T18:27:17.089Z Rule Zero desktop 0.2.1 loading https://rule-zero.net/' -match (Expand-Pattern 'Started' '0.2.1')))
   $fb = Get-DeltaInfo @(($ts + 'Download block maps (old: "a", new: b)'), ($ts + 'Cannot download differentially, fallback to full download: Error: 404'), ($ts + 'update: downloaded 0.2.3 (232,599,767 bytes, full)'))
-  [void](Test-That 'parse fallback lines' ($fb.delta -eq $false -and $fb.fallback -and $fb.appBytes -eq 232599767) ("delta {0}, app bytes {1}, source {2}" -f $fb.delta, $fb.appBytes, $fb.source))
+  $kb = Get-DeltaInfo @(($ts + 'update: downloaded 0.2.95 (delta, 842.8 KB fetched of 222.5 MB)'))
+  [void](Test-That 'parse the app line in KB' ($kb.appBytes -eq 863027) ("app bytes {0}" -f $kb.appBytes))
+  [void](Test-That 'parse fallback lines'($fb.delta -eq $false -and $fb.fallback -and $fb.appBytes -eq 232599767) ("delta {0}, app bytes {1}, source {2}" -f $fb.delta, $fb.appBytes, $fb.source))
   $ref = @(($ts + 'update: signature refused 0.2.99: signature does not verify'), ($ts + 'Error: Error: New version 0.2.99 is not signed by the application owner: sha512 mismatch'))
   [void](Test-That 'pattern SignatureRefused matches both forms' ((@($ref | Where-Object { $_ -match (Expand-Pattern 'SignatureRefused') })).Count -eq 2))
   [void](Test-That 'pattern SignatureOk does not match a refusal' ($null -eq (Find-Line $ref (Expand-Pattern 'SignatureOk'))))
